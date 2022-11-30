@@ -4,7 +4,6 @@ use std::io::{stdout, Write};
 use std::{thread};
 use std::mem::swap;
 use std::process::exit;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use getch::Getch;
 use terminal_size::{Height, terminal_size, Width};
@@ -13,7 +12,8 @@ type ThreadCmdClient = Arc<Mutex<CmdClient>>;
 
 pub struct CmdClient {
     prompt: String,
-    input: String
+    input: String,
+    cursor: usize
 }
 
 trait ClientSeal {
@@ -47,23 +47,39 @@ impl CmdClientHandle {
         loop {
             if let Ok(c) = getch.getch() {
                 let ch = c as char;
-                if c == 3 { // ^c
-                    exit(0);
+                let mut cl = self.client.seal();
+                match c {
+                    3 => exit(0), // ^C
+                    8 => { // backspace
+                        if cl.input.len() > 0 && cl.cursor > 0 {
+                            let cursor = cl.cursor;
+                            let _ = cl.input.remove(cursor - 1);
+                            cl.cursor = usize::min(cl.cursor - 1, cl.input.len());
+                        }
+                    },
+                    13 => break, // \n
+                    224 => if let Ok(c) = getch.getch() { // control key (arrow keys, etc)
+                        match c as char {
+                        'H' => (), // arrow up
+                        'P' => (), // arrow down
+                        'K' if cl.cursor > 0 => cl.cursor -= 1, // arrow left
+                        'M' if cl.cursor < cl.input.len() => cl.cursor += 1, // arrow right
+                        'G' => cl.cursor = 0, // pos1
+                        'O' => cl.cursor = cl.input.len(), // end
+                        'S' if cl.input.len() > 0 && cl.cursor < cl.input.len() => { // delete
+                            let cursor = cl.cursor;
+                            let _ = cl.input.remove(cursor);
+                        },
+                        _ => () // unsupported
+                    }}
+                    _ if ch.is_ascii() => { // ascii printable character
+                        let cursor = cl.cursor;
+                        cl.input.insert(cursor, ch);
+                        cl.cursor += 1;
+                    },
+                    _ => () // unsupported
                 }
-                else if c == 8 { // delete
-                    let mut c = self.client.seal();
-                    c.input.pop();
-                    c.refresh_input();
-                }
-                else if c == 13 { // \n
-                    break
-                }
-                // is printable?
-                else if ch.is_ascii() {
-                    let mut c = self.client.seal();
-                    c.input.push(ch);
-                    c.refresh_input();
-                }
+                cl.refresh_input();
             }
         }
     }
@@ -72,7 +88,7 @@ impl CmdClientHandle {
 impl CmdClient {
     pub fn start<T: 'static+Send>(prompt: &str, handler_args: T, input_handler: fn(&str, &T, &CmdClientHandle)) -> CmdClientHandle{
         let client = CmdClientHandle {
-            client: Arc::new(Mutex::new(Self {prompt: prompt.to_string(), input: String::new()}))
+            client: Arc::new(Mutex::new(Self {prompt: prompt.to_string(), input: String::new(), cursor: 0}))
         };
         let input_client = client.clone();
         thread::spawn(move ||{
@@ -80,6 +96,7 @@ impl CmdClient {
                 input_client.prompt_input();
                 let input = {
                     let mut c = input_client.client.seal();
+                    c.cursor = 0;
                     let mut input = String::new();
                     swap(&mut input, &mut c.input);
                     input
@@ -103,6 +120,7 @@ impl CmdClient {
         let (w, _) = Self::term_size();
         print!("\r{}", " ".repeat(w as usize));
         print!("\r{}{}", self.prompt, self.input);
+        print!("\r{}{}", self.prompt, unsafe {self.input.as_str().get_unchecked(0..self.cursor)});
         let _ = stdout().flush();
     }
 
